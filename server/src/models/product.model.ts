@@ -1,0 +1,175 @@
+import mongoose from "mongoose";
+
+const variantSizeSchema = new mongoose.Schema(
+    {
+        size: { type: String, required: true, trim: true },
+        stock: { type: Number, default: 0 },
+    },
+    { _id: false }
+);
+
+/* ─── Variant Sub-Schema ───────────────────────────────────────────────────────
+   Each variant represents a unique color option.
+   Supports per-variant: images, stock, optional price override, SKU, and sizes.
+   Designed to be extended in the future with material/etc. attributes.
+   ──────────────────────────────────────────────────────────────────────────── */
+const variantSchema = new mongoose.Schema(
+    {
+        color: {
+            name: { type: String, required: true, trim: true },
+            hex: { type: String, default: "#000000", trim: true },
+        },
+        sku: { type: String, default: "", trim: true },
+        sizes: {
+            type: [variantSizeSchema],
+            default: [],
+        },
+        quantity_on_hand: { type: Number, default: 0 },
+        quantity_reserved: { type: Number, default: 0 },
+        /** Optional per-variant price override. Falls back to product.price if null. */
+        price: { type: Number, default: null },
+        /** Optional per-variant sale price override. Falls back to product.sale_price if null. */
+        sale_price: { type: Number, default: null },
+        images: [{ type: String, trim: true }],
+    },
+    { 
+        _id: true,
+        toJSON: { virtuals: true },
+        toObject: { virtuals: true }
+    }
+);
+
+variantSchema.virtual("stock").get(function () {
+    return (this.quantity_on_hand || 0) - (this.quantity_reserved || 0);
+});
+
+const productSchema = new mongoose.Schema(
+    {
+        productId: {
+            type: String,
+            default: "",
+            unique: true,
+            trim: true,
+        },
+        name: {
+            type: String,
+            required: true,
+            trim: true,
+        },
+        slug: {
+            type: String,
+            required: true,
+            unique: true,
+            trim: true,
+        },
+        price: {
+            type: Number,
+            required: true,
+        },
+        vatPercentage: {
+            type: Number,
+            default: 0,
+        },
+        originalPrice: {
+            type: Number,
+            default: null,
+        },
+        base_price: {
+            type: Number,
+            default: 0,
+        },
+        offerType: {
+            type: String,
+            enum: ['NONE', 'PERCENTAGE', 'DIRECT'],
+            default: 'NONE',
+        },
+        offerValue: {
+            type: Number,
+            default: 0,
+        },
+        sale_price: {
+            type: Number,
+            default: 0,
+        },
+        is_on_sale: {
+            type: Boolean,
+            default: false,
+        },
+        deliveryCharge: [
+            {
+                text: { type: String, required: true },
+                price: { type: Number, required: true }
+            }
+        ],
+        thumbnail: {
+            type: String,
+            required: true,
+        },
+        /** Legacy flat gallery — kept for backward compatibility with old products. */
+        images: [
+            { type: String },
+        ],
+        /** ─── Color Variants ─────────────────────────────────────────────────
+            New structured variant system. Each element holds color info,
+            its own image gallery, and optional stock/price overrides.
+            Legacy products without this field continue to use the flat
+            `colors` and `images` arrays above.
+            ─────────────────────────────────────────────────────────────────── */
+        variants: {
+            type: [variantSchema],
+            default: [],
+        },
+        description: {
+            type: String,
+            required: true,
+        },
+        /** Legacy flat color list — kept for backward compatibility. */
+        colors: [{ type: String }],
+        sizes: [{ type: String, required: true }],
+        fabric: { type: String, default: "" },
+        fit: { type: String, default: "" },
+        highlights: [{ type: String }],
+        careInstructions: [{ type: String }],
+        /** Physical total stock in warehouse. Used when variants[] is empty. */
+        quantity_on_hand: { type: Number, default: 0 },
+        /** Stock reserved for pending orders. */
+        quantity_reserved: { type: Number, default: 0 },
+        /**
+         * @deprecated Legacy field from the old flat category system.
+         * Use `category` (ObjectId ref to Category) instead.
+         * Kept temporarily for backward compatibility during migration.
+         */
+        categoryAssignment: {
+            type: String,
+            enum: ['TOP', 'MIDDLE', 'BOTTOM'],
+            default: "TOP",
+        },
+        /** Reference to the Category document for the dynamic category system */
+        category: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Category",
+            default: null,
+        },
+        /** Optional external video URL (YouTube, Instagram, TikTok, etc.) */
+        videoUrl: { type: String, default: "", trim: true },
+        isActive: { type: Boolean, default: true },
+    },
+    { 
+        timestamps: true,
+        toJSON: { virtuals: true },
+        toObject: { virtuals: true }
+    }
+);
+
+productSchema.virtual("stock").get(function () {
+    return (this.quantity_on_hand || 0) - (this.quantity_reserved || 0);
+});
+
+productSchema.pre("save", async function () {
+    const doc = this as any;
+    if (doc.isNew && !doc.productId) {
+        doc.productId = "MB-" + Math.floor(100000 + Math.random() * 900000).toString();
+    }
+});
+
+export const Product = mongoose.models.Product || mongoose.model("Product", productSchema);

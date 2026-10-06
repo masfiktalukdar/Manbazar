@@ -1,0 +1,54 @@
+import mongoose from "mongoose";
+
+const adminSchema = new mongoose.Schema(
+    {
+        name: {
+            type: String,
+            required: false,
+        },
+        email: {
+            type: String,
+            required: true,
+            unique: true,
+            lowercase: true,
+            trim: true,
+        },
+        password: {
+            type: String,
+            required: false,
+            select: false,
+        },
+        role: {
+            type: String,
+            enum: ["ADMIN", "USER", "MANAGER"],
+            default: "ADMIN",
+        },
+        onboardingToken: {
+            type: String,
+            select: false,
+        },
+        onboardingTokenExpires: {
+            type: Date,
+        },
+        onboardingTokenUsed: {
+            type: Boolean,
+            default: false,
+        },
+        /** Hashed 6-digit OTP for password reset */
+        resetOtp: {
+            type: String,
+            select: false,
+        },
+        resetOtpExpires: {
+            type: Date,
+        },
+        resetOtpUsed: {
+            type: Boolean,
+            default: false,
+        },
+    },
+    { timestamps: true }
+);
+
+
+export const Admin = mongoose.model("admin", adminSchema)

@@ -1,0 +1,922 @@
+"use client";
+
+import { useContext, useEffect, useState, useRef, useCallback } from "react";
+import Image from "next/image";
+import { CartItem } from "@/types";
+import { OrderContext } from "@/providers/OrderProvider";
+import { createOrder } from "@/services/order";
+import { saveIncompleteOrder } from "@/services/incomplete-order";
+import { getUiData } from "@/services/ui";
+import { toast } from "sonner";
+import { sendGTMEvent } from "@next/third-parties/google";
+
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+import { Field, FieldContent, FieldLabel } from "@/components/ui/field";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Label } from "../ui/label";
+import { Button } from "../ui/button";
+import { X } from "lucide-react";
+
+// ─── Cart item row ─────────────────────────────────────────────────────────
+function CartItemRow({
+  item,
+  onIncrease,
+  onDecrease,
+  onSizeChange,
+  onColorChange,
+  onDelete,
+}: {
+  item: CartItem;
+  onIncrease: () => void;
+  onDecrease: () => void;
+  onSizeChange: (value: string) => void;
+  onColorChange: (value: string) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <>
+      {item?.product ? (
+        <div className="flex flex-row items-start gap-3 py-3 relative pr-8">
+          {/* Thumbnail */}
+          <div className="relative w-20 h-20 rounded-md border border-gray-200 overflow-hidden shrink-0 bg-gray-50">
+            <Image
+              src={
+                item?.variant?.images?.[0] ||
+                item?.product?.thumbnail ||
+                item?.product?.images?.[0] ||
+                "/placeholder.png"
+              }
+              alt={item?.product?.name || "Product"}
+              fill
+              className="object-cover"
+              sizes="80px"
+            />
+          </div>
+
+          {/* Name + controls */}
+          <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+            <p className="text-sm font-medium text-gray-800 line-clamp-2 leading-tight pr-2">
+              {item?.product?.name}
+            </p>
+
+            <p className="text-[15px] font-bold text-gray-900">
+              ৳ {(
+                (item?.variant
+                  ? (item.variant.sale_price != null && item.variant.sale_price > 0
+                    ? item.variant.sale_price
+                    : (item.variant.price != null && item.variant.price > 0
+                      ? item.variant.price
+                      : item.product.price))
+                  : item.product.price) * item.quantity
+              ).toFixed(2)}
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2 mt-0.5">
+              {/* Qty */}
+              <div className="flex items-center bg-white border border-gray-300 rounded">
+                <button onClick={onDecrease} className="w-7 h-7 flex items-center justify-center text-gray-600 hover:bg-gray-100 text-sm font-bold active:bg-gray-200">−</button>
+                <span className="text-xs font-semibold w-6 text-center">{item?.quantity}</span>
+                <button onClick={onIncrease} className="w-7 h-7 flex items-center justify-center text-gray-600 hover:bg-gray-100 text-sm font-bold active:bg-gray-200">+</button>
+              </div>
+
+              {/* select size */}
+              {item.size && (
+                <Select
+                  value={item.size}
+                  onValueChange={(val) => val && onSizeChange(val)}
+                >
+                  <SelectTrigger className="h-7 px-2 py-0 text-xs w-auto min-w-[60px] border-gray-300">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel className="text-xs">Size</SelectLabel>
+                      {item?.product?.sizes?.map((size) => (
+                        <SelectItem key={size} value={size} className="text-xs">
+                          {size}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              )}
+
+              {/* select color */}
+              {item.color && (
+                <Select
+                  value={item.color}
+                  onValueChange={(val) => val && onColorChange(val)}
+                >
+                  <SelectTrigger className="h-7 px-2 py-0 text-xs w-auto min-w-[70px] border-gray-300">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel className="text-xs">Color</SelectLabel>
+                      {item?.product?.colors?.map((color) => (
+                        <SelectItem key={color} value={color} className="text-xs">
+                          {color}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
+
+          {/* Delete Button */}
+          <button
+            onClick={onDelete}
+            className="absolute top-2 right-0 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+            title="Remove item"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+// ─── Order summary table ───────────────────────────────────────────────────
+function OrderSummary({
+  cart,
+  deliveryCharge,
+}: {
+  cart: CartItem[];
+  deliveryCharge: number;
+}) {
+  const getItemPrice = (item: CartItem) => {
+    if (item.variant) {
+      if (item.variant.sale_price != null && item.variant.sale_price > 0) {
+        return item.variant.sale_price;
+      }
+      if (item.variant.price != null && item.variant.price > 0) {
+        return item.variant.price;
+      }
+    }
+    return item.product.price;
+  };
+
+  const subtotal = cart.reduce(
+    (sum, item) => sum + getItemPrice(item) * item.quantity,
+    0,
+  );
+
+  const totalVat = cart.reduce((sum, item) => {
+    const vatPercent = item?.product?.vatPercentage || 0;
+    return sum + (getItemPrice(item) * item.quantity * (vatPercent / 100));
+  }, 0);
+
+  const total = subtotal + totalVat;
+  const grandTotal = total + deliveryCharge;
+
+  return (
+    <div className="mt-4 border border-gray-200 rounded-xl overflow-hidden text-sm bg-white shadow-sm">
+      {/* Header row */}
+      <div className="flex justify-between bg-gray-50/80 px-5 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wider border-b border-gray-200">
+        <span>Product</span>
+        <span>Subtotal</span>
+      </div>
+
+      {/* Items List */}
+      <div className="divide-y divide-gray-100">
+        {cart.map((item, idx) => {
+          const itemVatPercent = item?.product?.vatPercentage || 0;
+          return (
+            <div
+              key={idx}
+              className="flex items-center justify-between px-5 py-4 gap-4 bg-white"
+            >
+              <div className="flex items-center gap-3">
+                <div className="relative w-10 h-10 rounded-md overflow-hidden border border-gray-100 shrink-0 shadow-sm">
+                  <Image
+                    src={
+                      item.variant?.images?.[0] ||
+                      item.product.thumbnail ||
+                      item.product.images?.[0] ||
+                      "/placeholder.png"
+                    }
+                    alt={item.product.name}
+                    fill
+                    className="object-cover"
+                    sizes="40px"
+                  />
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-gray-800 font-medium leading-tight">
+                    {item.product.name}
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <span className="text-gray-500 text-xs">
+                      Qty: {item.quantity}
+                    </span>
+
+                    {/* Display Size & Color */}
+                    {(item.size || item.color) && (
+                      <span className="text-gray-400 text-[10px] bg-gray-100 px-1.5 py-0.5 rounded-sm whitespace-nowrap">
+                        {[item.size, item.color].filter(Boolean).join(" · ")}
+                      </span>
+                    )}
+
+                    {itemVatPercent > 0 && (
+                      <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded text-[10px] font-semibold">
+                        VAT {itemVatPercent}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <span className="text-gray-900 font-medium tabular-nums shrink-0">
+                ৳ {(getItemPrice(item) * item.quantity).toFixed(2)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Breakdown Section */}
+      <div className="bg-gray-50/50 px-5 py-4 space-y-3 border-t border-gray-200">
+        {/* Subtotal Row */}
+        <div className="flex justify-between items-center text-gray-600">
+          <span>Subtotal</span>
+          <span className="font-medium tabular-nums">
+            ৳ {subtotal.toFixed(2)}
+          </span>
+        </div>
+
+        {/* VAT Row */}
+        <div className="flex justify-between items-center text-gray-600">
+          <span>VAT Amount</span>
+          <span className="font-medium tabular-nums">
+            ৳ {totalVat.toFixed(2)}
+          </span>
+        </div>
+
+        {/* Midway Total Row */}
+        <div className="flex justify-between items-center text-gray-800 font-semibold pt-2 border-t border-gray-200/60">
+          <span>Total (incl. VAT)</span>
+          <span className="tabular-nums">
+            ৳ {total.toFixed(2)}
+          </span>
+        </div>
+
+        {/* Delivery Charge Row */}
+        <div className="flex justify-between items-center text-gray-600">
+          <span>Delivery Charge</span>
+          <span className="font-medium tabular-nums">
+            ৳ {deliveryCharge.toFixed(2)}
+          </span>
+        </div>
+      </div>
+
+      {/* Grand Total Row */}
+      <div className="flex justify-between items-center px-5 py-4 bg-gray-50 border-t border-gray-200">
+        <span className="font-bold text-gray-900 text-base">Grand Total</span>
+        <span className="font-bold text-primary text-xl tabular-nums">
+          ৳ {grandTotal.toFixed(2)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main billing section ──────────────────────────────────────────────────
+export default function BillingSection() {
+  const {
+    cartItems,
+    updateQuantity,
+    updateItemSize,
+    updateItemColor,
+    removeFromCart,
+    clearCart,
+  } = useContext(OrderContext);
+
+  const [isCheckoutLoading, setIsCheckoutLoading] = useState(false);
+  const [uiData, setUiData] = useState<any>(null);
+
+  useEffect(() => {
+    getUiData().then(res => {
+      if (res?.data?.[0]) {
+        setUiData(res.data[0]);
+      }
+    }).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (cartItems.length > 0) {
+      const getPrice = (item: CartItem) => {
+        if (item.variant) {
+          if (item.variant.sale_price != null && item.variant.sale_price > 0) return item.variant.sale_price;
+          if (item.variant.price != null && item.variant.price > 0) return item.variant.price;
+        }
+        return item.product.price;
+      };
+
+      sendGTMEvent({
+        event: "begin_checkout",
+        ecommerce: {
+          items: cartItems.map(item => ({
+            item_id: item.product.productId || item.product._id,
+            item_name: item.product.name,
+            price: getPrice(item),
+            quantity: item.quantity
+          }))
+        }
+      });
+    }
+  }, [cartItems.length]);
+
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [placedOrder, setPlacedOrder] = useState<any>(null);
+
+  // Billing form state
+  const [billing, setBilling] = useState({
+    name: "",
+    address: "",
+    phone: "",
+    email: "",
+    paymentMethod: "",
+    bkashTxnId: "",
+    senderNumber: "",
+    location: "dhaka",
+  });
+
+  // ── Incomplete Order Tracking ──────────────────────────────────────────────
+  const incompleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Generate or retrieve a unique session ID per browser tab
+  const getSessionId = useCallback(() => {
+    if (typeof window === "undefined") return "";
+    let sid = sessionStorage.getItem("incomplete_order_sid");
+    if (!sid) {
+      sid = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+      sessionStorage.setItem("incomplete_order_sid", sid);
+    }
+    return sid;
+  }, []);
+
+  // Check if the form state qualifies as an "incomplete order"
+  useEffect(() => {
+    // Clear any pending timer
+    if (incompleteTimerRef.current) {
+      clearTimeout(incompleteTimerRef.current);
+      incompleteTimerRef.current = null;
+    }
+
+    // Must have items in cart
+    if (cartItems.length === 0) return;
+
+    const nameOk = billing.name.trim().length >= 2;
+    const addressOk = billing.address.trim().length >= 2;
+    const phoneRegex = /^01[0-9]{9}$/;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const contactOk = phoneRegex.test(billing.phone.trim()) || emailRegex.test(billing.email.trim());
+
+    if (!nameOk || !addressOk || !contactOk) return;
+
+    // Debounce: wait 1.5s of no further changes before sending
+    incompleteTimerRef.current = setTimeout(() => {
+      const sessionId = getSessionId();
+      if (!sessionId) return;
+
+      const getItemPrice = (item: CartItem) => {
+        if (item.variant) {
+          if (item.variant.sale_price != null && item.variant.sale_price > 0) return item.variant.sale_price;
+          if (item.variant.price != null && item.variant.price > 0) return item.variant.price;
+        }
+        return item.product.price;
+      };
+
+      const totalPrice = cartItems.reduce(
+        (sum, item) => sum + getItemPrice(item) * item.quantity,
+        0
+      );
+
+      saveIncompleteOrder({
+        sessionId,
+        customer: {
+          name: billing.name.trim(),
+          phone: billing.phone.trim(),
+          email: billing.email.trim(),
+          address: billing.address.trim(),
+          location: billing.location,
+        },
+        products: cartItems.map((item) => ({
+          productId: item.product.productId || item.product._id,
+          name: item.product.name,
+          price: getItemPrice(item),
+          quantity: item.quantity,
+          size: item.size,
+          color: item.color,
+          thumbnail: item.variant?.images?.[0] || item.product.thumbnail || item.product.images?.[0] || "",
+        })),
+        totalPrice,
+        paymentMethod: billing.paymentMethod === "bkash" ? "bKash" : "CashOnDelivery",
+      });
+    }, 1500);
+
+    return () => {
+      if (incompleteTimerRef.current) {
+        clearTimeout(incompleteTimerRef.current);
+      }
+    };
+  }, [billing.name, billing.address, billing.phone, billing.email, billing.location, billing.paymentMethod, cartItems, getSessionId]);
+  // ── End Incomplete Order Tracking ──────────────────────────────────────────
+
+  const handleBillingChange =
+    (field: keyof typeof billing) => (e: React.ChangeEvent<HTMLInputElement>) =>
+      setBilling((prev) => ({ ...prev, [field]: e.target.value }));
+
+  const handleIncrease = (item: CartItem) =>
+    updateQuantity(item.product._id, item.size, item.color, item.quantity + 1);
+
+  const handleDecrease = (item: CartItem) =>
+    updateQuantity(item.product._id, item.size, item.color, item.quantity - 1);
+
+  const handleSizeChange = (item: CartItem, size: string) =>
+    updateItemSize(item.product._id, item.size, item.color, size);
+
+  const handleColorChange = (item: CartItem, color: string) =>
+    updateItemColor(item.product._id, item.size, item.color, color);
+
+  const handleRemoveItem = (item: CartItem) =>
+    removeFromCart(item.product._id, item.size, item.color);
+  const totalQuantity = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+
+  // Calculate dynamic delivery charge by finding the max delivery charge among items
+  let deliveryCharge = cartItems.length === 0 ? 0 : Math.max(
+    ...cartItems.map((item) => {
+      const charges = item.product?.deliveryCharge || [];
+
+      let chargeText = "";
+      if (billing.location === "dhaka") chargeText = "inside";
+      else if (billing.location === "outside") chargeText = "outside";
+      else if (billing.location === "subcity") chargeText = "subcity";
+      else chargeText = "inside";
+
+      const match = charges.find((d) =>
+        d.text.toLowerCase().includes(chargeText)
+      );
+
+      let defaultCharge = 50;
+      if (billing.location === "outside") defaultCharge = 150;
+      else if (billing.location === "subcity") defaultCharge = 100;
+
+      return (match && typeof match.price === 'number') ? match.price : defaultCharge;
+    })
+  );
+
+  // Apply dynamic delivery offer from admin settings
+  if (uiData?.deliveryOffer?.isActive && totalQuantity >= (uiData.deliveryOffer.minQuantity || 3)) {
+    deliveryCharge = uiData.deliveryOffer.deliveryCharge || 0;
+  }
+
+  const getItemPrice = (item: CartItem) => {
+    if (item.variant) {
+      if (item.variant.sale_price != null && item.variant.sale_price > 0) {
+        return item.variant.sale_price;
+      }
+      if (item.variant.price != null && item.variant.price > 0) {
+        return item.variant.price;
+      }
+    }
+    return item.product.price;
+  };
+
+  const subtotal = cartItems.reduce(
+    (sum, item) => sum + getItemPrice(item) * item.quantity,
+    0,
+  );
+
+  const totalVat = cartItems.reduce((sum, item, idx) => {
+    const vatPercent = item?.product?.vatPercentage || 0;
+    return sum + (getItemPrice(item) * item.quantity * (vatPercent / 100));
+  }, 0);
+
+  const totalAmount = subtotal + totalVat; // Total including VAT
+
+  const grandTotal = totalAmount + deliveryCharge;
+
+  const orderPayload = {
+    customer: { ...billing, email: billing.email || undefined },
+
+    // Top-level payment fields for lifecycle management
+    paymentMethod: billing.paymentMethod || "cod",
+    bkashTxnId: billing.paymentMethod === "bkash" ? billing.bkashTxnId : null,
+
+    products: cartItems.map((item) => ({
+      id: item.product._id,
+      productId: item.product.productId || item.product._id || "",
+      name: item.product.name,
+      price: getItemPrice(item),
+      quantity: item.quantity,
+      size: item.size,
+      color: item.color,
+    })),
+
+    subtotal: subtotal,
+    vat: totalVat,
+    deliveryCharge,
+    total: grandTotal,
+  };
+
+  const handlePlaceOrder = async () => {
+    if (
+      !billing.name.trim() ||
+      !billing.address.trim() ||
+      !billing.phone.trim()
+    ) {
+      toast.error("Please fill in all required billing fields.");
+      return;
+    }
+
+    const phoneRegex = /^01[0-9]{9}$/;
+    if (!phoneRegex.test(billing.phone.trim())) {
+      toast.error("আপনার ফোন নম্বরটি সঠিক নয়। দয়া করে ১১ ডিজিটের সঠিক নম্বর দিন (যেমন: 01XXXXXXXXX)।");
+      return;
+    }
+
+    if (cartItems.length === 0) {
+      toast.error("Please select a product before placing your order.");
+      return;
+    }
+
+    if (billing.paymentMethod === "bkash" && !billing.bkashTxnId.trim()) {
+      toast.error("Please enter your bKash Transaction ID before placing the order.");
+      return;
+    }
+
+    try {
+      const response = await createOrder(orderPayload);
+      setPlacedOrder({ ...orderPayload, orderId: response?.data?.orderId || response?.data?._id });
+      clearCart();
+      
+      sendGTMEvent({
+        event: "purchase",
+        ecommerce: {
+          transaction_id: response?.data?.orderId || response?.data?._id || `txn_${Date.now()}`,
+          value: grandTotal,
+          tax: totalVat,
+          shipping: deliveryCharge,
+          currency: "BDT",
+          items: cartItems.map(item => ({
+            item_id: item.product.productId || item.product._id,
+            item_name: item.product.name,
+            price: getItemPrice(item),
+            quantity: item.quantity
+          }))
+        }
+      });
+
+      setBilling({
+        name: "",
+        address: "",
+        phone: "",
+        email: "",
+        paymentMethod: "",
+        bkashTxnId: "",
+        senderNumber: "",
+        location: "dhaka",
+      });
+      setIsSuccess(true);
+      toast.success(`অর্ডার দেওয়া হয়েছে! মোট: ৳${grandTotal.toFixed(2)}`);
+      setTimeout(() => {
+        document.getElementById("order-success")?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    } catch (err: any) {
+      toast.error(
+        err.message ||
+        "Sorry, we could not place your order. Please try again.",
+      );
+    }
+  };
+
+  return (
+    <section id="billing" className="py-2 px-4 max-w-5xl mx-auto scroll-mt-24">
+      {isSuccess ? (
+        <div id="order-success" className="flex flex-col items-center justify-center py-10 w-full animate-in fade-in zoom-in duration-500 scroll-mt-24">
+          {/* Success Message */}
+          <div className="text-center print:hidden mb-10 flex flex-col items-center">
+            <div className="w-24 h-24 bg-green-100 text-green-500 rounded-full flex items-center justify-center mb-6 shadow-sm">
+              <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 className="text-3xl font-bold text-gray-800 mb-3">Order Placed Successfully!</h2>
+            <p className="text-gray-600 max-w-md mx-auto text-lg mb-8">
+              Thank you for your Order. We have received your order and will contact you shortly for confirmation.
+            </p>
+            <div className="flex flex-wrap gap-4 justify-center">
+              <button
+                onClick={() => {
+                  setIsSuccess(false);
+                  const productsSection = document.getElementById("products");
+                  if (productsSection) {
+                    productsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  } else {
+                    window.location.href = "/#products";
+                  }
+                }}
+                className="px-8 py-3 bg-gray-200 text-gray-800 font-semibold rounded-lg hover:bg-gray-300 transition-colors"
+              >
+                Continue Shopping
+              </button>
+            </div>
+          </div>
+
+          {/* Order Details Summary */}
+          {placedOrder && (
+            <div className="w-full max-w-xl bg-white border border-gray-100 rounded-xl p-6 shadow-sm text-left mx-auto">
+              <h3 className="text-xl font-bold text-gray-800 mb-4 border-b border-gray-100 pb-3">Order Summary</h3>
+
+              {placedOrder.orderId && (
+                <div className="flex justify-between items-center mb-3 text-sm">
+                  <span className="text-gray-500">Order ID:</span>
+                  <span className="font-semibold text-gray-800 text-base">#{placedOrder.orderId}</span>
+                </div>
+              )}
+
+              <div className="flex justify-between items-center mb-6 text-sm">
+                <span className="text-gray-500">Payment Method:</span>
+                <span className="font-semibold text-gray-800 uppercase">{placedOrder.paymentMethod}</span>
+              </div>
+
+              <div className="space-y-4 mb-6">
+                {placedOrder.products.map((p: any, idx: number) => (
+                  <div key={idx} className="flex justify-between items-start text-sm">
+                    <div className="pr-4">
+                      <p className="font-medium text-gray-800">{p.name}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Qty: {p.quantity} {p.size || p.color ? `| ${[p.size, p.color].filter(Boolean).join(", ")}` : ""}
+                      </p>
+                    </div>
+                    <span className="font-medium text-gray-900 whitespace-nowrap">৳ {(p.price * p.quantity).toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border-t border-gray-100 pt-4 space-y-2 text-sm">
+                <div className="flex justify-between text-gray-600">
+                  <span>Subtotal</span>
+                  <span>৳ {placedOrder.subtotal.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-gray-600">
+                  <span>Delivery Charge</span>
+                  <span>৳ {placedOrder.deliveryCharge.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-lg font-bold text-gray-900 pt-3 border-t border-gray-100 mt-2">
+                  <span>Total Amount</span>
+                  <span>৳ {placedOrder.total.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : cartItems.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-12">
+          {/* ── Left: Billing form ── */}
+          <form>
+            <h2 className="text-lg font-bold text-gray-800 mb-3 border-b border-gray-200">
+              Billing details
+            </h2>
+
+            <div className="flex flex-col gap-4">
+              {/* Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  আপনার নাম <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="name"
+                  value={billing.name}
+                  onChange={handleBillingChange("name")}
+                  placeholder="আপনার পুরো নাম লিখুন"
+                  className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+                />
+              </div>
+
+              {/* Address */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  আপনার সম্পূর্ণ ঠিকানা <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="address"
+                  value={billing.address}
+                  onChange={handleBillingChange("address")}
+                  placeholder="House number and street name"
+                  className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+                />
+              </div>
+
+              {/* Phone */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  আপনার ফোন নম্বর <span className="text-red-500">*</span>
+                </label>
+
+                <input
+                  type="number"
+                  value={billing.phone}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/[^0-9]/g, "");
+                    handleBillingChange("phone")({ target: { value: val } } as any);
+                  }}
+                  maxLength={11}
+                  placeholder="01XXXXXXXXX"
+                  className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+                />
+              </div>
+
+              {/* Email (Optional) */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  ইমেইল <span className="text-gray-400 text-xs font-normal">(ঐচ্ছিক — ইনভয়েস পেতে)</span>
+                </label>
+                <input
+                  type="email"
+                  value={billing.email}
+                  onChange={handleBillingChange("email")}
+                  placeholder="example@email.com"
+                  className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+                />
+              </div>
+
+              {/* delivery area */}
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  Delivery Area
+                </label>
+
+                <RadioGroup
+                  value={billing.location}
+                  onValueChange={(v) =>
+                    setBilling((prev) => ({
+                      ...prev,
+                      location: v,
+                    }))
+                  }
+                >
+                  <div className="flex gap-4">
+                    <div className="flex items-center gap-2">
+                      <RadioGroupItem value="dhaka" id="dhaka" />
+                      <Label htmlFor="dhaka">ঢাকার ভিতরে</Label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <RadioGroupItem value="subcity" id="subcity" />
+                      <Label htmlFor="subcity">উপশহরে</Label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <RadioGroupItem value="outside" id="outside" />
+                      <Label htmlFor="outside">ঢাকার বাইরে</Label>
+                    </div>
+                  </div>
+                </RadioGroup>
+              </div>
+            </div>
+
+            {/* Payment option */}
+            <Label className="mt-5 mb-2 text-base">Payment option</Label>
+            <RadioGroup
+              value={billing.paymentMethod}
+              onValueChange={(e) =>
+                setBilling((prev) => ({ ...prev, paymentMethod: e }))
+              }
+              className="flex"
+            >
+              <FieldLabel htmlFor="COD">
+                <Field orientation="horizontal">
+                  <FieldContent className="flex items-center justify-center h-12.5">
+                    <Image
+                      src="https://urbanattire-bd.com/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fcash-on-delivery.aeaebb08.png&w=128&q=75"
+                      alt="cash on delivery"
+                      width={100}
+                      height={100}
+                      className=""
+                    />
+                  </FieldContent>
+                  <RadioGroupItem value="cod" id="COD" />
+                </Field>
+              </FieldLabel>
+              <FieldLabel htmlFor="bkash">
+                <Field orientation="horizontal">
+                  <FieldContent className="flex items-center justify-center h-12.5">
+                    <Image
+                      src="https://dailyinqilab.com/mediaStorage/content/images/2025November/7-20251104001021.jpg"
+                      alt="bKash payment"
+                      width={100}
+                      height={10}
+                    />
+                  </FieldContent>
+                  <RadioGroupItem value="bkash" id="bkash" />
+                </Field>
+              </FieldLabel>
+            </RadioGroup>
+
+            {billing.paymentMethod === "bkash" && (
+              <div className="p-3 border border-pink-400 rounded-2xl mt-5">
+                <p className="mb-3 text-red-400 font-medium">
+                  এই bKash নাম্বারে টাকা পাঠান: 01XXXXXXXXX
+                </p>
+                <div className="mb-3">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    আপনার bKash নম্বর <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={billing.senderNumber}
+                    onChange={handleBillingChange("senderNumber")}
+                    placeholder="যে নাম্বার থেকে টাকা পাঠিয়েছেন সেটি লিখুন"
+                    className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-transparent transition"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    bKash ট্রানজেকশন আইডি <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={billing.bkashTxnId}
+                    onChange={handleBillingChange("bkashTxnId")}
+                    placeholder="পেমেন্ট করার পর যেই ট্রানজেকশন আইডি পেয়েছেন সেটি লিখুন"
+                    className="w-full border border-gray-300 rounded px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-pink-400 focus:border-transparent transition"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Place order button under form */}
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                handlePlaceOrder();
+              }}
+              className="w-full mt-6 bg-primary hover:bg-primary/90 text-white font-bold py-4 rounded-lg text-lg shadow-md transition-all duration-300 flex items-center justify-center gap-2 animate-cta-bounce hover:shadow-lg"
+            >
+              🔒 Confirm Order — ৳ {grandTotal.toFixed(2)}
+            </button>
+          </form>
+
+          {/* ── Right: Cart + Order Summary ── */}
+          <div>
+            {/* Cart selector heading */}
+            <h2 className="text-sm font-semibold text-gray-700 mb-3">
+              কোন শার্টটি নিবেন তার কোন সাইজেরটা সিলেক্ট করুন
+            </h2>
+
+            {/* Cart items */}
+            <div className="border border-gray-200 rounded-lg px-4 divide-y divide-gray-100">
+              {cartItems.map((item, idx) => (
+                <CartItemRow
+                  key={item.product._id + "-" + item.size + "-" + item.color}
+                  item={item}
+                  onIncrease={() => handleIncrease(item)}
+                  onDecrease={() => handleDecrease(item)}
+                  onSizeChange={(size) => handleSizeChange(item, size)}
+                  onColorChange={(color) => handleColorChange(item, color)}
+                  onDelete={() => handleRemoveItem(item)}
+                />
+              ))}
+            </div>
+
+            {/* Your order summary */}
+            <h2 className="text-base font-bold text-gray-800 mt-6 mb-2">
+              Your order
+            </h2>
+            <OrderSummary cart={cartItems} deliveryCharge={deliveryCharge} />
+
+
+
+            {/* Privacy note */}
+            <p className="text-xs text-gray-400 mt-3 leading-relaxed">
+              Your personal data will be used to process your order, support
+              your experience throughout this website, and for other purposes
+              described in our{" "}
+              <a href="#" className="underline hover:text-gray-600">
+                Privacy Policy
+              </a>
+
+            </p>
+
+
+          </div>
+        </div>
+      ) : (
+        ""
+      )}
+    </section>
+  );
+}
